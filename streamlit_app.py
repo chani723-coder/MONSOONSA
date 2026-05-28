@@ -375,9 +375,18 @@ if pp_file and wind_file:
                     valid_years,
                     index=len(valid_years) - 1,
                 )
+                selected_years_range = None
+
             else:
                 selected_year = None
-                st.write("Se usará todo el periodo disponible.")
+
+                selected_years_range = st.slider(
+                    "Periodo de años para el promedio",
+                    min_value=min(valid_years),
+                    max_value=max(valid_years),
+                    value=(min(valid_years), max(valid_years)),
+                    step=1,
+                )
 
         if st.button("Generar mapa"):
             if mode == "Mapa por año":
@@ -404,11 +413,23 @@ if pp_file and wind_file:
                 file_name = f"mapa_{period.replace(' ', '_')}_{selected_year}.png"
 
             else:
+
+                start_year, end_year = selected_years_range
+
+                years_for_mean = [
+                    year for year in valid_years
+                    if start_year <= year <= end_year
+                ]
+
+                if not years_for_mean:
+                    st.error("No hay años válidos dentro del periodo seleccionado.")
+                    st.stop()
+
                 pp_percent = calculate_precip_percentage_mean_all_years(
                     ds_pp=ds_pp,
                     pp_var=pp_var,
                     period=period,
-                    years=valid_years,
+                    years=years_for_mean,
                 )
 
                 u, v, speed = calculate_wind_average_mean_all_years(
@@ -416,18 +437,18 @@ if pp_file and wind_file:
                     u_var=u_var,
                     v_var=v_var,
                     period=period,
-                    years=valid_years,
+                    years=years_for_mean,
                 )
 
                 title = (
                     f"{period}\n"
-                    f"Promedio {min(valid_years)}-{max(valid_years)}\n"
+                    f"Promedio {min(years_for_mean)}-{max(years_for_mean)}\n"
                     f"% precipitación anual + viento promedio"
                 )
 
                 file_name = (
                     f"mapa_promedio_{period.replace(' ', '_')}_"
-                    f"{min(valid_years)}_{max(valid_years)}.png"
+                    f"{min(years_for_mean)}_{max(years_for_mean)}.png"
                 )
 
             fig = plot_map(pp_percent, u, v, speed, title)
