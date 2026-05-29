@@ -6,6 +6,8 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+from matplotlib.colors import Normalize,PowerNorm
+
 
 from streamlit.components.v1 import html
 from css.styleDashboard import color_fondo_dash
@@ -15,7 +17,6 @@ st.set_page_config(page_title="Mapa PP + Viento", layout="centered")
 st.markdown(color_fondo_dash,unsafe_allow_html=True)
 
 st.title("Mapas estacionales de precipitación acumulada y viento")
-
 
 st.markdown("""
 ### Metodología de cálculo
@@ -28,11 +29,11 @@ Si la variable de precipitación viene en metros:
 
 **Precipitación acumulada estacional**
 
-PP mensual = precipitación mensual en milímetros
+PP mensual acumulada = PP promedio diaria mensual × número de días del mes
 
-PP verano DJF = PP Dic + PP Ene + PP Feb
+PP verano DJF = PP diaria media Dic × 31 + PP diaria media Ene × 31 + PP diaria media Feb × 28/29
 
-PP invierno JJA = PP Jun + PP Jul + PP Ago
+PP invierno JJA = PP diaria media Jun x 30 + PP diaria media Jul x 31 + PP diaria media Ago 31
 
 Para verano DJF:
 
@@ -69,6 +70,28 @@ COUNTRY_EXTENTS = {
     "Paraguay": [-63, -54, -28, -19],
     "Uruguay": [-59, -52, -36, -30],
 }
+
+
+AVAILABLE_CMAPS = [
+    "viridis",
+    "plasma",
+    "inferno",
+    "magma",
+    "cividis",
+    "turbo",
+    "Spectral",
+    "coolwarm",
+    "RdYlBu",
+    "terrain",
+    "gist_earth",
+    "ocean",
+    "YlGnBu",
+    "Blues",
+    "Greens",
+    "Oranges",
+    "Reds",
+]
+
 
 
 def open_nc(file):
@@ -162,14 +185,11 @@ def convert_pp_to_mm(da):
         da.attrs["units"] = "mm"
         return da
 
-    if units in ["mm", "millimeter", "millimeters", "millimetre", "millimetres"]:
+    if "m" in units and "mm" not in units:
+        da = da * 1000.0
         da.attrs["units"] = "mm"
         return da
 
-    st.warning(
-        "No se pudo identificar claramente la unidad de precipitación. "
-        "Se asumirá que la precipitación ya está en milímetros."
-    )
     da.attrs["units"] = "mm"
     return da
 
@@ -229,10 +249,7 @@ def get_available_years(pp_months, wind_months, period):
     for year in years:
         months = seasonal_months(period, year)
 
-        pp_has_months = all(m in pp_months for m in months)
-        wind_has_months = all(m in wind_months for m in months)
-
-        if pp_has_months and wind_has_months:
+        if all(m in pp_months for m in months) and all(m in wind_months for m in months):
             valid_years.append(year)
 
     return valid_years
@@ -252,7 +269,18 @@ def calculate_precip_accumulated_one_year(ds_pp, pp_var, period, year):
     months = seasonal_months(period, year)
     ds_season = select_season(ds_pp[[pp_var]], months)
 
-    pp_accumulated_mm = reduce_extra_dims(ds_season[pp_var]).sum(dim="time")
+    pp_daily_mean_mm = reduce_extra_dims(ds_season[pp_var])
+
+    time_periods = pd.to_datetime(ds_season.time.values).to_period("M")
+    days_in_month = xr.DataArray(
+        [period.days_in_month for period in time_periods],
+        dims=["time"],
+        coords={"time": ds_season.time.values},
+    )
+
+    pp_monthly_accumulated_mm = pp_daily_mean_mm * days_in_month
+
+    pp_accumulated_mm = pp_monthly_accumulated_mm.sum(dim="time")
     pp_accumulated_mm = ensure_lat_lon_order(pp_accumulated_mm)
     pp_accumulated_mm.attrs["units"] = "mm"
 
@@ -329,87 +357,113 @@ def get_quiver_style(map_extent, lon):
         step = max(1, int(len(lon) / 35))
         quiver_scale = 250
         quiver_width = 0.0022
-        quiver_key = 10
-
     elif map_span >= 25:
         step = max(1, int(len(lon) / 28))
         quiver_scale = 150
         quiver_width = 0.0028
-        quiver_key = 10
-
     elif map_span >= 12:
         step = max(1, int(len(lon) / 22))
         quiver_scale = 75
         quiver_width = 0.0038
-        quiver_key = 10
-
     else:
         step = max(1, int(len(lon) / 16))
         quiver_scale = 45
         quiver_width = 0.0045
-        quiver_key = 5
 
-    return step, quiver_scale, quiver_width, quiver_key
+    return step, quiver_scale, quiver_width
 
 
-def plot_map(pp_data, u, v, speed, title, map_extent):
+def get_real_min_max(values):
+    clean_values = values[np.isfinite(values)]
+
+    if clean_values.size == 0:
+        raise ValueError("No hay valores numéricos válidos para graficar.")
+
+    vmin = float(np.nanmin(clean_values))
+    vmax = float(np.nanmax(clean_values))
+
+
+    if np.isclose(vmin, vmax):
+        delta = abs(vmax) * 0.05 if vmax != 0 else 1.0
+        vmin = vmin - delta
+        vmax = vmax + delta
+
+    return vmin, vmax
+
+
+def plot_map(
+    pp_data,
+    u,
+    v,
+    speed,
+    title,
+    map_extent,
+    pp_cmap_name,
+    wind_cmap_name,
+    quiver_edge_color,
+    legend_text_color,
+    title_color,
+    title_fontsize,
+    title_fontfamily,
+    title_fontweight,
+):
     lon, lat = get_lon_lat_from_dataarray(pp_data)
 
-    fig = plt.figure(figsize=(11, 10))
+    fig = plt.figure(figsize=(12, 10))
     ax = plt.axes(projection=ccrs.PlateCarree())
 
     ax.set_extent(map_extent, crs=ccrs.PlateCarree())
 
     pp_values = pp_data.values
+    speed_values = speed.values
 
-    vmin = float(np.nanpercentile(pp_values, 5))
-    vmax = float(np.nanpercentile(pp_values, 95))
+    pp_vmin, pp_vmax = get_real_min_max(pp_values)
+    wind_vmin, wind_vmax = get_real_min_max(speed_values)
 
-    if np.isclose(vmin, vmax):
-        vmin = float(np.nanmin(pp_values))
-        vmax = float(np.nanmax(pp_values))
+    pp_levels = np.linspace(pp_vmin, pp_vmax, 32)
 
-    levels = np.linspace(vmin, vmax, 14)
+    pp_cmap = plt.get_cmap(pp_cmap_name)
+    wind_cmap = plt.get_cmap(wind_cmap_name)
+
+    pp_norm = PowerNorm(
+        gamma=0.30,
+        vmin=pp_vmin,
+        vmax=pp_vmax,
+    )
 
     cf = ax.contourf(
         lon,
         lat,
         pp_values,
-        levels=levels,
-        cmap="Blues",
+        levels=pp_levels,
+        cmap=pp_cmap,
+        norm=pp_norm,
         transform=ccrs.PlateCarree(),
-        extend="both",
+        extend="neither",
     )
 
-    step, quiver_scale, quiver_width, quiver_key = get_quiver_style(
+    step, quiver_scale, quiver_width = get_quiver_style(
         map_extent=map_extent,
         lon=lon,
     )
+
+    wind_speed_sub = speed.values[::step, ::step]
 
     q = ax.quiver(
         lon[::step],
         lat[::step],
         u.values[::step, ::step],
         v.values[::step, ::step],
-        speed.values[::step, ::step],
-        cmap="plasma",
+        wind_speed_sub,
+        cmap=wind_cmap,
+        norm=Normalize(vmin=wind_vmin, vmax=wind_vmax),
         transform=ccrs.PlateCarree(),
         scale=quiver_scale,
         width=quiver_width,
         headwidth=3.5,
         headlength=4.5,
-        edgecolor="black",
-        linewidth=0.15,
-    )
-
-    ax.quiverkey(
-        q,
-        X=0.83,
-        Y=-0.08,
-        U=quiver_key,
-        label=f"{quiver_key} m/s",
-        labelpos="E",
-        coordinates="axes",
+        edgecolor=quiver_edge_color,
+        linewidth=0.25,
     )
 
     ax.coastlines(linewidth=0.8)
@@ -425,20 +479,34 @@ def plot_map(pp_data, u, v, speed, title, map_extent):
         ax=ax,
         orientation="horizontal",
         pad=0.08,
-        shrink=0.75,
+        shrink=0.78,
     )
-    cbar_pp.set_label("Precipitación acumulada estacional (mm)")
+    cbar_pp.set_label(
+        f"Precipitación acumulada estacional (mm) | min: {pp_vmin:.2f} - max: {pp_vmax:.2f}",
+        color=legend_text_color,
+    )
+    cbar_pp.ax.tick_params(colors=legend_text_color)
 
     cbar_wind = plt.colorbar(
         q,
         ax=ax,
         orientation="vertical",
         pad=0.03,
-        shrink=0.65,
+        shrink=0.72,
     )
-    cbar_wind.set_label("Velocidad del viento (m/s)")
+    cbar_wind.set_label(
+        f"Velocidad del viento (m/s) | min: {wind_vmin:.2f} - max: {wind_vmax:.2f}",
+        color=legend_text_color,
+    )
+    cbar_wind.ax.tick_params(colors=legend_text_color)
 
-    ax.set_title(title, fontsize=14, weight="bold")
+    ax.set_title(
+        title,
+        fontsize=title_fontsize,
+        fontfamily=title_fontfamily,
+        fontweight=title_fontweight,
+        color=title_color,
+    )
 
     return fig
 
@@ -466,21 +534,81 @@ if pp_file and wind_file:
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            period = st.selectbox(
-                "Periodo",
-                ["Verano DJF", "Invierno JJA"],
-            )
+            period = st.selectbox("Periodo", ["Verano DJF", "Invierno JJA"])
 
         with col2:
-            mode = st.selectbox(
-                "Tipo de mapa",
-                ["Mapa por año", "Mapa promedio de años"],
-            )
+            mode = st.selectbox("Tipo de mapa", ["Mapa por año", "Mapa promedio de años"])
 
         with col3:
-            selected_region = st.selectbox(
-                "Región",
-                list(COUNTRY_EXTENTS.keys()),
+            selected_region = st.selectbox("Región", list(COUNTRY_EXTENTS.keys()))
+
+        st.divider()
+        st.subheader("Personalización del mapa")
+
+        col_color1, col_color2 = st.columns(2)
+
+        with col_color1:
+            pp_cmap_base = st.selectbox(
+                "Paleta de precipitación",
+                AVAILABLE_CMAPS,
+                index=0,
+            )
+
+            invert_pp_cmap = st.checkbox(
+                "Invertir paleta de precipitación",
+                value=False,
+            )
+
+        with col_color2:
+            wind_cmap_base = st.selectbox(
+                "Paleta de viento",
+                AVAILABLE_CMAPS,
+                index=1,
+            )
+
+            invert_wind_cmap = st.checkbox(
+                "Invertir paleta de viento",
+                value=False,
+            )
+
+        pp_cmap_name = f"{pp_cmap_base}_r" if invert_pp_cmap else pp_cmap_base
+        wind_cmap_name = f"{wind_cmap_base}_r" if invert_wind_cmap else wind_cmap_base
+
+        col_style1, col_style2, col_style3, col_style4 = st.columns(4)
+
+        with col_style1:
+            quiver_edge_color = st.color_picker("Borde de flechas", value="#000000")
+
+        with col_style2:
+            legend_text_color = st.color_picker("Color de leyendas", value="#000000")
+
+        with col_style3:
+            title_color = st.color_picker("Color del título", value="#000000")
+
+        with col_style4:
+            title_fontsize = st.slider("Tamaño del título", 8, 32, 14, 1)
+
+        col_title1, col_title2 = st.columns(2)
+
+        with col_title1:
+            title_fontfamily = st.selectbox(
+                "Tipo de letra del título",
+                [
+                    "DejaVu Sans",
+                    "DejaVu Serif",
+                    "Arial",
+                    "Times New Roman",
+                    "Calibri",
+                    "Verdana",
+                    "Georgia",
+                ],
+            )
+
+        with col_title2:
+            title_fontweight = st.selectbox(
+                "Grosor del título",
+                ["normal", "bold", "semibold", "light"],
+                index=1,
             )
 
         valid_years = get_available_years(
@@ -502,7 +630,6 @@ if pp_file and wind_file:
                 valid_years,
                 index=len(valid_years) - 1,
             )
-
         else:
             selected_years_range = st.slider(
                 "Periodo de años para calcular el promedio",
@@ -513,100 +640,117 @@ if pp_file and wind_file:
             )
 
         if st.button("Generar mapa"):
-            map_extent = COUNTRY_EXTENTS[selected_region]
+            with st.spinner("Espere un momento por favor."):
+                map_extent = COUNTRY_EXTENTS[selected_region]
 
-            if mode == "Mapa por año":
-                pp_data = calculate_precip_accumulated_one_year(
-                    ds_pp=ds_pp,
-                    pp_var=pp_var,
-                    period=period,
-                    year=selected_year,
+                if mode == "Mapa por año":
+                    pp_data = calculate_precip_accumulated_one_year(
+                        ds_pp=ds_pp,
+                        pp_var=pp_var,
+                        period=period,
+                        year=selected_year,
+                    )
+
+                    u, v, speed = calculate_wind_average_one_year(
+                        ds_wind=ds_wind,
+                        u_var=u_var,
+                        v_var=v_var,
+                        period=period,
+                        year=selected_year,
+                    )
+
+                    title = (
+                        f"{selected_region} - {period} {selected_year}\n"
+                        f"Precipitación acumulada estacional + viento promedio"
+                    )
+
+                    file_name = (
+                        f"mapa_{selected_region.replace(' ', '_')}_"
+                        f"pp_acumulada_{period.replace(' ', '_')}_{selected_year}.png"
+                    )
+
+                else:
+                    start_year, end_year = selected_years_range
+
+                    years_for_mean = [
+                        year for year in valid_years
+                        if start_year <= year <= end_year
+                    ]
+
+                    if not years_for_mean:
+                        st.error("No hay años válidos dentro del periodo seleccionado.")
+                        st.stop()
+
+                    pp_data = calculate_precip_accumulated_mean_years(
+                        ds_pp=ds_pp,
+                        pp_var=pp_var,
+                        period=period,
+                        years=years_for_mean,
+                    )
+
+                    u, v, speed = calculate_wind_average_mean_years(
+                        ds_wind=ds_wind,
+                        u_var=u_var,
+                        v_var=v_var,
+                        period=period,
+                        years=years_for_mean,
+                    )
+
+                    title = (
+                        f"{selected_region} - {period}\n"
+                        f"Promedio {min(years_for_mean)}-{max(years_for_mean)}\n"
+                        f"Precipitación acumulada estacional + viento promedio"
+                    )
+
+                    file_name = (
+                        f"mapa_promedio_{selected_region.replace(' ', '_')}_"
+                        f"pp_acumulada_{period.replace(' ', '_')}_"
+                        f"{min(years_for_mean)}_{max(years_for_mean)}.png"
+                    )
+
+                st.write("PP acumulada mínima (mm):", float(np.nanmin(pp_data.values)))
+                st.write("PP acumulada máxima (mm):", float(np.nanmax(pp_data.values)))
+                st.write("Velocidad mínima del viento (m/s):", float(np.nanmin(speed.values)))
+                st.write("Velocidad máxima del viento (m/s):", float(np.nanmax(speed.values)))
+
+                fig = plot_map(
+                    pp_data=pp_data,
+                    u=u,
+                    v=v,
+                    speed=speed,
+                    title=title,
+                    map_extent=map_extent,
+                    pp_cmap_name=pp_cmap_name,
+                    wind_cmap_name=wind_cmap_name,
+                    quiver_edge_color=quiver_edge_color,
+                    legend_text_color=legend_text_color,
+                    title_color=title_color,
+                    title_fontsize=title_fontsize,
+                    title_fontfamily=title_fontfamily,
+                    title_fontweight=title_fontweight,
                 )
 
-                u, v, speed = calculate_wind_average_one_year(
-                    ds_wind=ds_wind,
-                    u_var=u_var,
-                    v_var=v_var,
-                    period=period,
-                    year=selected_year,
+                st.pyplot(fig)
+
+                buffer = io.BytesIO()
+                fig.savefig(buffer, format="png", dpi=300, bbox_inches="tight")
+                buffer.seek(0)
+
+                st.download_button(
+                    label="Descargar mapa PNG",
+                    data=buffer,
+                    file_name=file_name,
+                    mime="image/png",
                 )
-
-                title = (
-                    f"{selected_region} - {period} {selected_year}\n"
-                    f"Precipitación acumulada estacional + viento promedio"
-                )
-
-                file_name = (
-                    f"mapa_{selected_region.replace(' ', '_')}_"
-                    f"pp_acumulada_{period.replace(' ', '_')}_{selected_year}.png"
-                )
-
-            else:
-                start_year, end_year = selected_years_range
-
-                years_for_mean = [
-                    year for year in valid_years
-                    if start_year <= year <= end_year
-                ]
-
-                if not years_for_mean:
-                    st.error("No hay años válidos dentro del periodo seleccionado.")
-                    st.stop()
-
-                pp_data = calculate_precip_accumulated_mean_years(
-                    ds_pp=ds_pp,
-                    pp_var=pp_var,
-                    period=period,
-                    years=years_for_mean,
-                )
-
-                u, v, speed = calculate_wind_average_mean_years(
-                    ds_wind=ds_wind,
-                    u_var=u_var,
-                    v_var=v_var,
-                    period=period,
-                    years=years_for_mean,
-                )
-
-                title = (
-                    f"{selected_region} - {period}\n"
-                    f"Promedio {min(years_for_mean)}-{max(years_for_mean)}\n"
-                    f"Precipitación acumulada estacional + viento promedio"
-                )
-
-                file_name = (
-                    f"mapa_promedio_{selected_region.replace(' ', '_')}_"
-                    f"pp_acumulada_{period.replace(' ', '_')}_"
-                    f"{min(years_for_mean)}_{max(years_for_mean)}.png"
-                )
-
-            fig = plot_map(
-                pp_data=pp_data,
-                u=u,
-                v=v,
-                speed=speed,
-                title=title,
-                map_extent=map_extent,
-            )
-
-            st.pyplot(fig)
-
-            buffer = io.BytesIO()
-            fig.savefig(buffer, format="png", dpi=300, bbox_inches="tight")
-            buffer.seek(0)
-
-            st.download_button(
-                label="Descargar mapa PNG",
-                data=buffer,
-                file_name=file_name,
-                mime="image/png",
-            )
 
     except Exception as e:
         st.error(f"Error: {e}")
 
 else:
     st.info("Sube ambos archivos NetCDF para iniciar el procesamiento.")
+
+
+
 
 html("""
 <script>
