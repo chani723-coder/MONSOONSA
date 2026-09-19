@@ -38,34 +38,29 @@ st.title(
 st.markdown("""
 ### Metodología de cálculo
 
-La precipitación del archivo NetCDF se convierte a milímetros antes
-de realizar los cálculos.
+La variable de precipitación del archivo NetCDF representa el
+**acumulado mensual de precipitación**.
 
-Si la variable de precipitación viene en metros:
+Si la variable de precipitación viene expresada en metros:
 
 **1 m = 1000 mm**
 
+Por tanto, primero se realiza la conversión de metros a milímetros.
+
+---
+
 ### Precipitación acumulada estacional
 
-El producto utilizado representa la precipitación diaria promedio
-para cada mes.
+No se multiplica la precipitación por el número de días del mes.
 
-Por lo tanto:
+Cada paso temporal mensual representa directamente el acumulado
+correspondiente a ese mes.
 
-**PP mensual acumulada = PP promedio diaria mensual × número de días del mes**
+#### Verano DJF
 
-Para verano:
+El acumulado de verano se calcula como:
 
-**DJF = diciembre + enero + febrero**
-
-Por tanto:
-
-**PP verano DJF = PP diaria media Dic × 31
-+ PP diaria media Ene × 31
-+ PP diaria media Feb × 28/29**
-
-Febrero utiliza automáticamente 28 o 29 días dependiendo de si
-el año es bisiesto.
+**PP verano DJF = PP Dic + PP Ene + PP Feb**
 
 Para un año determinado:
 
@@ -73,19 +68,38 @@ Para un año determinado:
 + enero del año presente
 + febrero del año presente**
 
-Ejemplo:
+Por ejemplo:
 
 **DJF 2020 = diciembre 2019 + enero 2020 + febrero 2020**
 
-Para invierno:
+---
 
-**JJA = junio + julio + agosto**
+#### Invierno JJA
 
-Por tanto:
+El acumulado de invierno se calcula como:
 
-**PP invierno JJA = PP diaria media Jun × 30
-+ PP diaria media Jul × 31
-+ PP diaria media Ago × 31**
+**PP invierno JJA = PP Jun + PP Jul + PP Ago**
+
+En este caso los tres meses pertenecen al mismo año.
+
+Por ejemplo:
+
+**JJA 2020 = junio 2020 + julio 2020 + agosto 2020**
+
+---
+
+### Mapa promedio de varios años
+
+Para cada año se calcula primero el acumulado estacional correspondiente.
+
+Por ejemplo, para DJF:
+
+**DJF año = Dic año anterior + Ene año + Feb año**
+
+Después se calcula el promedio de los mapas estacionales obtenidos
+para todos los años seleccionados.
+
+---
 
 ### Viento promedio
 
@@ -95,15 +109,15 @@ Se calcula primero el promedio temporal de las componentes:
 
 **v_prom = promedio de la componente meridional v**
 
-La velocidad resultante se calcula como:
+La velocidad del viento resultante se calcula como:
 
 **Velocidad = √(u_prom² + v_prom²)**
 
-La dirección del viento se representa mediante las flechas utilizando
+La dirección del viento se representa mediante flechas utilizando
 directamente `u_prom` y `v_prom`.
 
-El viento se promedia vectorialmente; no se promedian directamente
-las velocidades.
+Por tanto, el viento se promedia vectorialmente y no mediante el
+promedio directo de las velocidades.
 """)
 
 
@@ -373,9 +387,9 @@ def convert_pp_to_mm(da):
         da.attrs.get("units", "")
     ).lower().strip()
 
-    # ------------------------------------------
+    # --------------------------------------------------------
     # Metros -> milímetros
-    # ------------------------------------------
+    # --------------------------------------------------------
 
     if units in [
         "m",
@@ -391,21 +405,9 @@ def convert_pp_to_mm(da):
 
         return da
 
-    # ------------------------------------------
-    # Variantes que contienen m pero no mm
-    # ------------------------------------------
-
-    if "m" in units and "mm" not in units:
-
-        da = da * 1000.0
-
-        da.attrs["units"] = "mm"
-
-        return da
-
-    # ------------------------------------------
+    # --------------------------------------------------------
     # Si ya está en mm
-    # ------------------------------------------
+    # --------------------------------------------------------
 
     if "mm" in units:
 
@@ -460,9 +462,9 @@ def check_compatibility(
         ds_wind
     )
 
-    # ------------------------------------------
-    # Validación de dimensiones
-    # ------------------------------------------
+    # --------------------------------------------------------
+    # Dimensiones espaciales
+    # --------------------------------------------------------
 
     if (
         ds_pp[pp_lat].size
@@ -484,9 +486,9 @@ def check_compatibility(
             "entre precipitación y viento."
         )
 
-    # ------------------------------------------
-    # Validación de coordenadas
-    # ------------------------------------------
+    # --------------------------------------------------------
+    # Coordenadas espaciales
+    # --------------------------------------------------------
 
     if not np.allclose(
         ds_pp[pp_lat].values,
@@ -508,9 +510,9 @@ def check_compatibility(
             "entre precipitación y viento."
         )
 
-    # ------------------------------------------
-    # Meses
-    # ------------------------------------------
+    # --------------------------------------------------------
+    # Meses disponibles
+    # --------------------------------------------------------
 
     pp_months = sorted(
         set(
@@ -673,11 +675,6 @@ def select_season(
         months
     )
 
-    # ------------------------------------------
-    # Cada estación debe contener exactamente
-    # los tres pasos mensuales requeridos.
-    # ------------------------------------------
-
     if mask.sum() != 3:
 
         raise ValueError(
@@ -712,56 +709,25 @@ def calculate_precip_accumulated_one_year(
     )
 
     # --------------------------------------------------------
-    # Los valores representan PP diaria media mensual
-    # expresada ya en mm/día después de la conversión.
+    # Cada timestep representa directamente el
+    # ACUMULADO MENSUAL de precipitación.
+    #
+    # NO se multiplica por el número de días.
+    #
+    # DJF = Dic + Ene + Feb
+    # JJA = Jun + Jul + Ago
     # --------------------------------------------------------
 
-    pp_daily_mean_mm = reduce_extra_dims(
+    pp_monthly_mm = reduce_extra_dims(
         ds_season[pp_var]
     )
 
-    # --------------------------------------------------------
-    # Días reales de cada mes.
-    #
-    # pandas determina automáticamente:
-    # febrero = 28 o 29 días.
-    # --------------------------------------------------------
-
-    time_periods = pd.to_datetime(
-        ds_season.time.values
-    ).to_period("M")
-
-    days_in_month = xr.DataArray(
-
-        [
-            month.days_in_month
-            for month in time_periods
-        ],
-
-        dims=["time"],
-
-        coords={
-            "time": ds_season.time.values
-        },
-    )
-
-    # --------------------------------------------------------
-    # PP mensual acumulada
-    # --------------------------------------------------------
-
-    pp_monthly_accumulated_mm = (
-        pp_daily_mean_mm
-        * days_in_month
-    )
-
-    # --------------------------------------------------------
-    # Acumulado estacional
-    # DJF o JJA
-    # --------------------------------------------------------
-
     pp_accumulated_mm = (
-        pp_monthly_accumulated_mm
-        .sum(dim="time")
+        pp_monthly_mm
+        .sum(
+            dim="time",
+            skipna=True
+        )
     )
 
     pp_accumulated_mm = (
@@ -813,7 +779,10 @@ def calculate_precip_accumulated_mean_years(
         .assign_coords(
             year=years
         )
-        .mean(dim="year")
+        .mean(
+            dim="year",
+            skipna=True
+        )
     )
 
     result_mean.attrs[
@@ -856,18 +825,20 @@ def calculate_wind_average_one_year(
 
     u = reduce_extra_dims(
         ds_season[u_var]
-    ).mean(dim="time")
+    ).mean(
+        dim="time",
+        skipna=True
+    )
 
     v = reduce_extra_dims(
         ds_season[v_var]
-    ).mean(dim="time")
+    ).mean(
+        dim="time",
+        skipna=True
+    )
 
     u = ensure_lat_lon_order(u)
     v = ensure_lat_lon_order(v)
-
-    # --------------------------------------------------------
-    # Magnitud del vector promedio
-    # --------------------------------------------------------
 
     speed = np.sqrt(
         u ** 2
@@ -920,7 +891,10 @@ def calculate_wind_average_mean_years(
         .assign_coords(
             year=years
         )
-        .mean(dim="year")
+        .mean(
+            dim="year",
+            skipna=True
+        )
     )
 
     v_mean = (
@@ -931,7 +905,10 @@ def calculate_wind_average_mean_years(
         .assign_coords(
             year=years
         )
-        .mean(dim="year")
+        .mean(
+            dim="year",
+            skipna=True
+        )
     )
 
     speed_mean = np.sqrt(
@@ -1029,14 +1006,12 @@ def crop_dataarray_to_extent(
             "intersecta la grilla del NetCDF."
         )
 
-    cropped = da.isel(
+    return da.isel(
         {
             lon_name: lon_idx,
             lat_name: lat_idx,
         }
     )
-
-    return cropped
 
 
 # ============================================================
@@ -1193,40 +1168,28 @@ def plot_map(
 ):
 
     # --------------------------------------------------------
-    # RECORTE REAL DE LA MATRIZ AL RECTÁNGULO VISIBLE
+    # Recorte al rectángulo geográfico seleccionado
     # --------------------------------------------------------
 
-    pp_plot = (
-        crop_dataarray_to_extent(
-            pp_data,
-            map_extent
-        )
+    pp_plot = crop_dataarray_to_extent(
+        pp_data,
+        map_extent
     )
 
-    u_plot = (
-        crop_dataarray_to_extent(
-            u,
-            map_extent
-        )
+    u_plot = crop_dataarray_to_extent(
+        u,
+        map_extent
     )
 
-    v_plot = (
-        crop_dataarray_to_extent(
-            v,
-            map_extent
-        )
+    v_plot = crop_dataarray_to_extent(
+        v,
+        map_extent
     )
 
-    speed_plot = (
-        crop_dataarray_to_extent(
-            speed,
-            map_extent
-        )
+    speed_plot = crop_dataarray_to_extent(
+        speed,
+        map_extent
     )
-
-    # --------------------------------------------------------
-    # Coordenadas ya recortadas
-    # --------------------------------------------------------
 
     lon, lat = (
         get_lon_lat_from_dataarray(
@@ -1252,7 +1215,7 @@ def plot_map(
     )
 
     # --------------------------------------------------------
-    # Valores SOLO de la región seleccionada
+    # Valores de la región seleccionada
     # --------------------------------------------------------
 
     pp_values = (
@@ -1262,10 +1225,6 @@ def plot_map(
     speed_values = (
         speed_plot.values
     )
-
-    # --------------------------------------------------------
-    # Rango real regional
-    # --------------------------------------------------------
 
     pp_vmin, pp_vmax = (
         get_real_min_max(
@@ -1280,7 +1239,7 @@ def plot_map(
     )
 
     # --------------------------------------------------------
-    # Niveles PP
+    # Precipitación
     # --------------------------------------------------------
 
     pp_levels = np.linspace(
@@ -1288,10 +1247,6 @@ def plot_map(
         pp_vmax,
         32
     )
-
-    # --------------------------------------------------------
-    # Colormaps
-    # --------------------------------------------------------
 
     pp_cmap = plt.get_cmap(
         pp_cmap_name
@@ -1301,21 +1256,11 @@ def plot_map(
         wind_cmap_name
     )
 
-    # --------------------------------------------------------
-    # Normalización PP
-    #
-    # Conserva min/max reales, pero aumenta contraste visual.
-    # --------------------------------------------------------
-
     pp_norm = PowerNorm(
         gamma=0.30,
         vmin=pp_vmin,
         vmax=pp_vmax,
     )
-
-    # --------------------------------------------------------
-    # PRECIPITACIÓN
-    # --------------------------------------------------------
 
     cf = ax.contourf(
         lon,
@@ -1329,7 +1274,7 @@ def plot_map(
     )
 
     # --------------------------------------------------------
-    # QUIVER
+    # Viento
     # --------------------------------------------------------
 
     (
@@ -1389,7 +1334,7 @@ def plot_map(
     )
 
     # --------------------------------------------------------
-    # CARTOGRAFÍA
+    # Cartografía
     # --------------------------------------------------------
 
     ax.coastlines(
@@ -1408,10 +1353,6 @@ def plot_map(
         linewidth=0.3
     )
 
-    # --------------------------------------------------------
-    # GRID
-    # --------------------------------------------------------
-
     gl = ax.gridlines(
         draw_labels=True,
         linewidth=0.3,
@@ -1422,7 +1363,7 @@ def plot_map(
     gl.right_labels = False
 
     # --------------------------------------------------------
-    # LEYENDA PRECIPITACIÓN
+    # Barra de precipitación
     # --------------------------------------------------------
 
     cbar_pp = plt.colorbar(
@@ -1447,7 +1388,7 @@ def plot_map(
     )
 
     # --------------------------------------------------------
-    # LEYENDA VIENTO
+    # Barra de viento
     # --------------------------------------------------------
 
     cbar_wind = plt.colorbar(
@@ -1472,7 +1413,7 @@ def plot_map(
     )
 
     # --------------------------------------------------------
-    # TÍTULO
+    # Título
     # --------------------------------------------------------
 
     ax.set_title(
@@ -1526,7 +1467,7 @@ if pp_file and wind_file:
         )
 
         # ----------------------------------------------------
-        # Variable PP
+        # Variable precipitación
         # ----------------------------------------------------
 
         pp_var = guess_pp_variable(
@@ -1534,7 +1475,7 @@ if pp_file and wind_file:
         )
 
         # ----------------------------------------------------
-        # Guardamos metadata ORIGINAL antes de convertir
+        # Guardar metadata ORIGINAL antes de convertir
         # ----------------------------------------------------
 
         raw_pp_attrs = dict(
@@ -1550,7 +1491,7 @@ if pp_file and wind_file:
         )
 
         # ----------------------------------------------------
-        # Conversión a mm
+        # Convertir precipitación a mm
         # ----------------------------------------------------
 
         ds_pp = prepare_pp_dataset(
@@ -1569,7 +1510,7 @@ if pp_file and wind_file:
         )
 
         # ----------------------------------------------------
-        # Compatibilidad temporal / espacial
+        # Validación
         # ----------------------------------------------------
 
         (
@@ -1659,7 +1600,7 @@ if pp_file and wind_file:
             )
 
             # -----------------------------------------------
-            # Tiempos
+            # Tiempo
             # -----------------------------------------------
 
             st.write(
@@ -1790,10 +1731,6 @@ if pp_file and wind_file:
             st.columns(2)
         )
 
-        # ----------------------------------------------------
-        # PP
-        # ----------------------------------------------------
-
         with col_color1:
 
             pp_cmap_base = (
@@ -1810,10 +1747,6 @@ if pp_file and wind_file:
                     value=False,
                 )
             )
-
-        # ----------------------------------------------------
-        # VIENTO
-        # ----------------------------------------------------
 
         with col_color2:
 
@@ -2240,7 +2173,7 @@ if pp_file and wind_file:
 
 
                 # ============================================
-                # PNG
+                # DESCARGA PNG
                 # ============================================
 
                 buffer = io.BytesIO()
